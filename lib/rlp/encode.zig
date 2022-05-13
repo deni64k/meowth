@@ -1,51 +1,23 @@
 const mem = std.mem;
 const std = @import("std");
 
-// const RLP = struct {
-//     allocator: mem.Allocator,
-//     buf: std.ArrayList(u8),
-//     len: usize = 0,
+pub fn encode(allocator: mem.Allocator, o: anytype) ![]const u8 {
+    var rlp = RLP.init(allocator);
+    defer rlp.deinit();
 
-//     pub fn init(allocator: mem.Allocator) RLP {
-//         return RLP{
-//             .allocator = allocator,
-//             .buf = std.ArrayList(u8).init(allocator),
-//         };
-//     }
+    _ = try rlp.encode(o);
 
-//     pub fn deinit(self: *RLP) void {
-//         self.buf.deinit();
-//     }
-
-//     pub fn encode(self: *RLP, o: anytype) !void {
-//         const T = @TypeOf(o);
-//         switch (@typeInfo(T)) {
-//             .Bool => {},
-//             .Int, .ComptimeInt => {
-//                 if (o < 0x7f) {
-//                     try self.buf.append(o);
-//                     self.len += 1;
-//                 } else {
-//                     unreachable;
-//                 }
-//             },
-//             else => unreachable,
-//         }
-//     }
-
-//     pub fn slice(self: *RLP) []u8 {
-//         return self.buf.items;
-//     }
-// };
+    return rlp.buf.toOwnedSlice();
+}
 
 const RLP = struct {
     allocator: mem.Allocator,
-    buf: std.fifo.LinearFifo(u8, .Dynamic),
+    buf: std.ArrayList(u8),
 
     pub fn init(allocator: mem.Allocator) RLP {
         return RLP{
             .allocator = allocator,
-            .buf = std.fifo.LinearFifo(u8, .Dynamic).init(allocator),
+            .buf = std.ArrayList(u8).init(allocator),
         };
     }
 
@@ -53,167 +25,140 @@ const RLP = struct {
         self.buf.deinit();
     }
 
-    pub fn encode(self: *RLP, o: anytype) !void {
+    pub fn encode(self: *RLP, o: anytype) !usize {
+        var len: usize = 0;
+
         const T = @TypeOf(o);
         switch (@typeInfo(T)) {
             .Bool => {},
-            .Int, .ComptimeInt => {
-                if (o < 0x7f) {
-                    try self.buf.writeItem(o);
-                } else {
-                    unreachable;
-                }
+            .ComptimeInt => {
+                var integer = @intCast(u64, o);
+                len += try self.writeInt(integer);
+            },
+            .Int => {
+                len += try self.writeInt(o);
             },
             .Array => |t| {
                 if (t.child != u8) {
-                    try self.writeList(o);
-                } else if (o.len <= 55) {
-                    try self.writeString(o[0..]);
+                    len += try self.writeList(o);
                 } else {
-                    try self.writeLongString(o[0..]);
+                    len += try self.writeString(o[0..]);
                 }
             },
             .Pointer => |t| {
                 if (t.size == .One) {
-                    try self.encode(o.*);
+                    len += try self.encode(o.*);
                 } else {
-                    if (o.len <= 55) {
-                        try self.writeString(o[0..]);
-                    } else {
-                        try self.writeLongString(o[0..]);
-                    }
+                    len += try self.writeString(o[0..]);
                 }
             },
             else => unreachable,
         }
+
+        return len;
     }
 
-    fn writeByte(self: *RLP, byte: u8) !void {
-        std.debug.assert(byte <= 0x7f);
-        return try self.buf.writeItem(byte);
-    }
-
-    fn writeString(self: *RLP, bytes: []const u8) !void {
-        std.debug.assert(bytes.len <= 55);
-        const len: u8 = 0x80 + @truncate(u8, bytes.len);
-        try self.buf.writeItem(len);
-        return try self.buf.write(bytes);
-    }
-
-    fn writeLongString(self: *RLP, bytes: []const u8) !void {
-        std.debug.assert(bytes.len > 55);
-        const len: u8 = 0xb8;
-
-        var bytes_len_be: u64 = std.mem.nativeToLittle(u64, bytes.len);
-        var bytes_len_slice: []u8 = undefined;
-        if (bytes.len < 0xff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..1];
-        } else if (bytes.len <= 0xffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..2];
-        } else if (bytes.len <= 0xffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..3];
-        } else if (bytes.len <= 0xffffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..4];
-        } else if (bytes.len <= 0xffffffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..5];
-        } else if (bytes.len <= 0xffffffffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..6];
-        } else if (bytes.len <= 0xffffffffffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..7];
-        } else if (bytes.len <= 0xffffffffffffff) {
-            bytes_len_slice = mem.asBytes(&bytes_len_be).*[0..8];
+    fn writeInt(self: *RLP, integer: anytype) !usize {
+        if (integer < 0x7f) {
+            try self.buf.append(@truncate(u8, integer));
+            return 1;
         }
-        try self.buf.writeItem(len + @truncate(u8, bytes_len_slice.len));
-        try self.buf.write(bytes_len_slice);
-        return try self.buf.write(bytes);
+
+        var len: u8 = undefined;
+        if (integer <= 0xff) {
+            len = 1;
+        } else if (len <= 0xffff) {
+            len = 2;
+        } else if (len <= 0xffffff) {
+            len = 3;
+        } else if (len <= 0xffffffff) {
+            len = 4;
+        } else if (len <= 0xffffffffff) {
+            len = 5;
+        } else if (len <= 0xffffffffffff) {
+            len = 6;
+        } else if (len <= 0xffffffffffffff) {
+            len = 7;
+        } else if (len <= 0xffffffffffffffff) {
+            len = 8;
+        }
+        try self.buf.append(len + 0x80);
+        const be = mem.nativeToBig(u64, @intCast(u64, integer));
+        const bs = mem.asBytes(&be);
+        try self.buf.appendSlice(bs.*[(bs.len - len)..]);
+        return 1 + @intCast(usize, len);
     }
 
-    fn writeList(self: *RLP, list: anytype) !void {
-        std.debug.assert(list.len <= 56);
-        const len: u8 = 0xc0 + @truncate(u8, list.len);
-        try self.buf.writeItem(len);
+    fn writeString(self: *RLP, bytes: []const u8) !usize {
+        var prefix_raw: [9]u8 = undefined;
+        const prefix = RLP.encodeLen(0x80, bytes.len, &prefix_raw);
+        try self.buf.appendSlice(prefix);
+        try self.buf.appendSlice(bytes);
+        return prefix.len + bytes.len;
+    }
+
+    fn writeList(self: *RLP, list: anytype) !usize {
+        var len: usize = 0;
         for (list) |x| {
-            try self.encode(x);
+            len += try self.encode(x);
         }
+        var prefix_raw: [9]u8 = undefined;
+        const prefix = RLP.encodeLen(0xc0, len, &prefix_raw);
+        try self.buf.insertSlice(0, prefix);
+        return prefix.len + len;
+    }
+
+    fn encodeLen(comptime offset: u8, len: usize, out: *[9]u8) []u8 {
+        if (len <= 55) {
+            out[0] = @truncate(u8, len) + offset;
+            return out.*[0..1];
+        }
+
+        var len_be = mem.nativeToBig(u64, @intCast(u64, len));
+        var len_bs = mem.asBytes(&len_be);
+        var len_slice: []u8 = undefined;
+        if (len <= 0xff) {
+            len_slice = len_bs.*[7..];
+        } else if (len <= 0xffff) {
+            len_slice = len_bs.*[6..];
+        } else if (len <= 0xffffff) {
+            len_slice = len_bs.*[5..];
+        } else if (len <= 0xffffffff) {
+            len_slice = len_bs.*[4..];
+        } else if (len <= 0xffffffffff) {
+            len_slice = len_bs.*[3..];
+        } else if (len <= 0xffffffffffff) {
+            len_slice = len_bs.*[2..];
+        } else if (len <= 0xffffffffffffff) {
+            len_slice = len_bs.*[1..];
+        } else if (len <= 0xffffffffffffffff) {
+            len_slice = len_bs.*[0..];
+        }
+        out[0] = offset + @as(u8, 55) + @truncate(u8, len_slice.len);
+        mem.copy(u8, out[1..9], len_slice);
+        return out[0..(1 + len_slice.len)];
     }
 
     pub fn slice(self: *RLP) []const u8 {
-        return self.buf.readableSlice(0);
+        return self.buf.items;
     }
 };
 
-pub fn encode(allocator: mem.Allocator, o: anytype) !void {
-    const T = @TypeOf(o);
-    switch (@typeInfo(T)) {
-        .Bool => {},
-        .Int, .ComptimeInt => {},
-        else => unreachable,
-    }
-    var result: []u8 = try allocator.alloc(u8, 32);
-    defer allocator.free(result);
+const testing = std.testing;
 
-    std.debug.print("result is {any}\n", .{result});
+fn testEncode(expected: []const u8, value: anytype) !void {
+    const encoded = try encode(testing.allocator, value);
+    defer testing.allocator.free(encoded);
+    try testing.expect(mem.eql(u8, encoded, expected));
 }
 
-const expect = std.testing.expect;
-
-test "EncodeInt" {
-    const alloc = std.testing.allocator;
-    try encode(alloc, 1);
-
-    var rlp = RLP.init(alloc);
-    defer rlp.deinit();
-    try rlp.encode(1);
-    try rlp.encode(42);
-    try rlp.encode("abcd");
-    try rlp.encode("ABCD");
-    std.debug.print("rlp.slice is ", .{});
-
-    for (rlp.slice()) |x| {
-        std.debug.print("{x:0>2}", .{x});
-    }
-    std.debug.print("\n", .{});
-}
-
-test "EncodeDog" {
-    const alloc = std.testing.allocator;
-
-    var rlp = RLP.init(alloc);
-    defer rlp.deinit();
-    try rlp.encode("dog");
-    std.debug.print("rlp.slice is ", .{});
-
-    for (rlp.slice()) |x| {
-        std.debug.print("{x:0>2}", .{x});
-    }
-    std.debug.print("\n", .{});
-}
-
-test "EncodeCatDog" {
-    const alloc = std.testing.allocator;
-
-    var rlp = RLP.init(alloc);
-    defer rlp.deinit();
-    const data: [2][]const u8 = [_][]const u8{ "cat", "dog" };
-    try rlp.encode(data);
-    std.debug.print("rlp.slice is ", .{});
-
-    for (rlp.slice()) |x| {
-        std.debug.print("{x:0>2}", .{x});
-    }
-    std.debug.print("\n", .{});
-}
-
-test "EncodeLoremIpsum" {
-    const alloc = std.testing.allocator;
-
-    var rlp = RLP.init(alloc);
-    defer rlp.deinit();
-    try rlp.encode("Lorem ipsum dolor sit amet, consectetur adipisicing elit");
-    std.debug.print("rlp.slice is ", .{});
-
-    for (rlp.slice()) |x| {
-        std.debug.print("{x:0>2}", .{x});
-    }
-    std.debug.print("\n", .{});
+test "TestEncode" {
+    try testEncode("\x00", 0);
+    try testEncode("\x0f", 15);
+    try testEncode("\x82\x04\x00", 1024);
+    try testEncode("\x83dog", "dog");
+    try testEncode("\xc0", [_][]const u8{});
+    // try testEncode("\xc7\xc0\xc1\xc0\xc3\xc0\xc1\xc0", [_][][]const u8{ [_][]const u8{}, [_][]const u8{[_][]const u8{}}, [_][]const u8{ [_][]const u8{}, [_][]const u8{[_][]const u8{}} } });
+    try testEncode("\xc8\x83cat\x83dog", [_][]const u8{ "cat", "dog" });
+    try testEncode("\xb8\x38Lorem ipsum dolor sit amet, consectetur adipisicing elit", "Lorem ipsum dolor sit amet, consectetur adipisicing elit");
 }
