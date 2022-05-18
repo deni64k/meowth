@@ -277,5 +277,13 @@ flycheck_*.el
 vcpkg
 _builds
 
-zig-cache
+# Zig-specific files
+zig-cache/
+zig-out/
+/release/
+/debug/
+/build/
+/build-*/
+/docgen_tmp/
+
 .cxx
