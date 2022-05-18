@@ -10,7 +10,7 @@ pub fn build(b: *Builder) void {
     exe.setTarget(target);
     exe.linkSystemLibrary("crypto");
     exe.linkSystemLibrary("c");
-
+    exe.defineCMacro("OPENSSL_NO_FILENAMES", null);
     exe.addPackagePath("meowth", "lib/meowth.zig");
     exe.addPackagePath("zig-string", "vendor/zig-string-288ab2f/zig-string.zig");
 
@@ -26,7 +26,10 @@ pub fn build(b: *Builder) void {
     const main_tests = b.addTest("src/main.zig");
     main_tests.linkSystemLibrary("crypto");
     main_tests.linkSystemLibrary("c");
+    main_tests.defineCMacro("OPENSSL_NO_FILENAMES", null);
     main_tests.setBuildMode(mode);
+    main_tests.addPackagePath("meowth", "lib/meowth.zig");
+    main_tests.addPackagePath("zig-string", "vendor/zig-string-288ab2f/zig-string.zig");
 
     const lib_tests = b.addTest("lib/meowth.zig");
     lib_tests.linkSystemLibrary("crypto");

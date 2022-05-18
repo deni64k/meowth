@@ -12,8 +12,8 @@ pub const EnodeError = error{
 
 const enodePrefix = "enode://";
 
-const Enode = struct {
-    id: [128]u8,
+pub const Enode = struct {
+    id: [64]u8,
     ip: std.net.Address,
     tcp_port: u16,
     udp_port: ?u16 = null,
@@ -31,8 +31,8 @@ const Enode = struct {
         };
         var buf = s[0..];
         buf = buf[enodePrefix.len..];
-        std.mem.copy(u8, enode.id[0..], buf[0..128]);
-        buf = buf[(enode.id.len + 1)..];
+        _ = try std.fmt.hexToBytes(&enode.id, buf[0..128]);
+        buf = buf[(128 + 1)..];
 
         const ip_len = std.mem.indexOf(u8, buf, ":");
         if (ip_len == null) {
@@ -69,7 +69,8 @@ test "ParseGoerliEnode" {
     const enode = try Enode.parse("enode://a869b02cec167211fb4815a82941db2e7ed2936fd90e78619c53eb17753fcf0207463e3419c264e2a1dd8786de0df7e68cf99571ab8aeb7c4e51367ef186b1dd@51.15.116.226:30303");
 
     var buf: [100]u8 = undefined;
-    var ip = std.fmt.bufPrint(buf[0..], "{}", .{enode.ip}) catch unreachable;
-    try testing.expectEqualStrings(enode.id[0..], "a869b02cec167211fb4815a82941db2e7ed2936fd90e78619c53eb17753fcf0207463e3419c264e2a1dd8786de0df7e68cf99571ab8aeb7c4e51367ef186b1dd");
+    var id: [64]u8 = undefined;
+    var ip = try std.fmt.bufPrint(buf[0..], "{}", .{enode.ip});
+    try testing.expectEqualStrings(enode.id[0..], try std.fmt.hexToBytes(&id, "a869b02cec167211fb4815a82941db2e7ed2936fd90e78619c53eb17753fcf0207463e3419c264e2a1dd8786de0df7e68cf99571ab8aeb7c4e51367ef186b1dd"));
     try testing.expectEqualStrings(ip, "51.15.116.226:30303");
 }

@@ -1,14 +1,6 @@
 const std = @import("std");
 const crypto = std.crypto;
 const mem = std.mem;
-const openssl = @cImport({
-    @cInclude("openssl/crypto.h");
-    @cInclude("openssl/rand.h");
-    @cInclude("openssl/obj_mac.h");
-    @cInclude("openssl/ec.h");
-    @cInclude("openssl/err.h");
-    @cInclude("openssl/evp.h");
-});
 
 const meowth = @import("meowth");
 
@@ -17,60 +9,96 @@ pub fn main() anyerror!void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var ctx = meowth.crypto.Context.init() catch unreachable;
+    var ctx = try meowth.crypto.Context.init();
     defer ctx.deinit();
 
-    var key: *openssl.EC_KEY = openssl.EC_KEY_new_by_curve_name(openssl.NID_secp256k1) orelse return error.CouldNotGetKey;
-    if (openssl.EC_KEY_generate_key(key) != 1) {
-        return error.CouldNotGenerateKey;
+    var key = try meowth.crypto.Secp256k1.generate();
+    defer key.deinit();
+
+    key.setCoversion(true);
+
+    if (false) {
+        var privkey: [:0]u8 = key.privateKeyToBytes(allocator) catch unreachable;
+        defer allocator.free(privkey);
+
+        std.debug.print("privkey.len={d}\n", .{privkey.len});
+        std.debug.print("privkey={any}\n", .{privkey});
     }
 
-    std.debug.print("key={any}\n", .{key});
-
-    openssl.EC_KEY_set_conv_form(key, openssl.POINT_CONVERSION_COMPRESSED);
-
-    {
-        const pri_size = @intCast(usize, openssl.i2d_ECPrivateKey(key, 0));
-        var pri: [:0]u8 = try allocator.allocSentinel(u8, pri_size, 0);
-        defer allocator.free(pri);
-        const pri_n = openssl.i2d_ECPrivateKey(key, @ptrCast([*c][*c]u8, &@ptrCast([*c]u8, pri)));
-
-        std.debug.assert(pri_size == pri_n);
-        std.debug.print("pri_size={d}\n", .{pri_size});
-        std.debug.print("pri_n={d}\n", .{pri_n});
-        std.debug.print("pri={any}\n", .{pri});
-    }
-
-    {
-        const pubkey_size = @intCast(usize, openssl.i2o_ECPublicKey(key, 0));
-        var pubkey: [:0]u8 = try allocator.allocSentinel(u8, pubkey_size, 0);
+    if (false) {
+        var pubkey: [:0]u8 = try key.publicKeyToBytes(allocator);
         defer allocator.free(pubkey);
-        const pubkey_n = openssl.i2o_ECPublicKey(key, @ptrCast([*c][*c]u8, &@ptrCast([*c]u8, pubkey)));
 
-        std.debug.assert(pubkey_size == pubkey_n);
-        std.debug.print("pubkey_size={d}\n", .{pubkey_size});
-        std.debug.print("pubkey_n={d}\n", .{pubkey_n});
+        std.debug.print("pubkey.len={d}\n", .{pubkey.len});
         std.debug.print("pubkey={any}\n", .{pubkey});
     }
 
-    {
+    if (false) {
         const message = "Hello, Ethereum!";
 
-        var sig_size = openssl.ECDSA_size(key);
-        std.debug.print("sig_size={d}\n", .{sig_size});
-        var sig: [:0]u8 = try allocator.allocSentinel(u8, @intCast(usize, sig_size), 0);
-        defer allocator.free(sig);
-        const rv = openssl.ECDSA_sign(0, message, message.len, @ptrCast([*c]u8, sig), @ptrCast([*c]c_uint, &sig_size), key);
+        const signature = try key.sign(allocator, message);
+        defer allocator.free(signature);
 
-        std.debug.assert(rv == 1);
-        std.debug.print("sig_size={d}\n", .{sig_size});
-        std.debug.print("sig={any}\n", .{sig});
+        std.debug.print("signature.len={d}\n", .{signature.len});
+        std.debug.print("signature={any}\n", .{signature});
 
-        const verified = openssl.ECDSA_verify(0, message, message.len, @ptrCast([*c]u8, sig), sig_size, key);
-        std.debug.print("verified={d}\n", .{verified});
+        const verified = key.verify(signature, message);
+        std.debug.print("verified={any}\n", .{verified});
     }
 
-    // meowth.params.ropstenBootnodes;
+    if (false) {
+        const bootnode = meowth.params.ropstenBootnodes[0];
+        const enode = try meowth.p2p.Enode.parse(bootnode);
+
+        std.debug.print("Trying to connect to a bootnode: {s}\n", .{enode.ip});
+
+        var remote = try meowth.crypto.Secp256k1.fromPublicKey(enode.id[0..]);
+        defer remote.deinit();
+        var auth = try meowth.crypto.Handshake.initiate(key, remote);
+        defer auth.deinit();
+
+        std.debug.print("Shared secret is {d}\n", .{auth.symkey});
+    }
+
+    {
+        std.debug.print("\t*** Sender side ***\n", .{});
+
+        var local = try meowth.crypto.Secp256k1.generate();
+        defer local.deinit();
+        var remote = try meowth.crypto.Secp256k1.generate();
+        defer remote.deinit();
+        var auth = try meowth.crypto.Handshake.initiate(local, remote);
+        defer auth.deinit();
+
+        {
+            var buf: [:0]u8 = try auth.local.publicKeyToBytes(allocator);
+            defer allocator.free(buf);
+
+            std.debug.print("Node's public key={d}\n", .{buf});
+        }
+        {
+            var buf: [:0]u8 = try auth.elocal.publicKeyToBytes(allocator);
+            defer allocator.free(buf);
+
+            std.debug.print("Ephemeral public key={d}\n", .{buf});
+        }
+
+        std.debug.print("Shared secret is {d}\n", .{auth.symkey});
+
+        std.debug.print("\t*** Receiver side ***\n", .{});
+
+        var reply = try meowth.crypto.Handshake.reciever(remote, auth.elocal);
+        defer reply.deinit();
+
+        {
+            var buf: [:0]u8 = try reply.local.publicKeyToBytes(allocator);
+            defer allocator.free(buf);
+
+            std.debug.print("Receiver's public key={d}\n", .{buf});
+        }
+
+        std.debug.print("Shared secret is {d}\n", .{reply.symkey});
+    }
 
     return;
 }
