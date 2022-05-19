@@ -98,6 +98,18 @@ pub fn main() anyerror!void {
         }
 
         std.debug.print("Shared secret is {d}\n", .{reply.symkey});
+
+        {
+            var encrypted = try auth.encrypt(allocator, "Hidden in plain sight");
+            defer allocator.free(encrypted);
+
+            std.debug.print("Encrypted={d}\n", .{encrypted});
+
+            var decrypted = try auth.decrypt(allocator, encrypted);
+            defer allocator.free(decrypted);
+
+            std.debug.print("Decrypted={s}\n", .{decrypted});
+        }
     }
 
     return;

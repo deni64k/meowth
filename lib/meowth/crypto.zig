@@ -9,6 +9,11 @@ const openssl = @cImport({
     @cInclude("openssl/evp.h");
 });
 
+//
+// Used materials:
+// * https://github.com/insanum/ecies/blob/master/ecies_openssl.c
+//
+
 pub const Context = struct {
     pub fn init() !Context {
         var err = openssl.OPENSSL_init_crypto(openssl.OPENSSL_INIT_LOAD_CONFIG, null);
@@ -151,6 +156,8 @@ pub const Handshake = struct {
     elocal: Secp256k1 = undefined,
     remote: Secp256k1,
     symkey: [*:0]u8,
+    iv: [16:0]u8 = undefined,
+    tag: [16:0]u8 = undefined,
 
     pub fn initiate(local: Secp256k1, remote: Secp256k1) !Handshake {
         const elocal = try Secp256k1.generate();
@@ -192,6 +199,68 @@ pub const Handshake = struct {
             .remote = remote,
             .symkey = @ptrCast([*:0]u8, symkey.?),
         };
+    }
+
+    pub fn encrypt(self: *Handshake, allocator: mem.Allocator, plaintext: []const u8) ![]u8 {
+        var ciphertext = try allocator.allocSentinel(u8, (plaintext.len + 0x0f) & ~@as(u8, 0x0f), 0);
+
+        var rv = openssl.RAND_pseudo_bytes(&self.iv, self.iv.len);
+        std.debug.assert(rv == 1);
+
+        var ctx = openssl.EVP_CIPHER_CTX_new();
+        defer openssl.EVP_CIPHER_CTX_free(ctx);
+
+        rv = openssl.EVP_EncryptInit_ex(ctx, openssl.EVP_aes_128_ctr(), null, null, null);
+        std.debug.assert(rv == 1);
+        rv = openssl.EVP_EncryptInit_ex(ctx, null, null, self.symkey, &self.iv);
+        std.debug.assert(rv == 1);
+
+        var ciphertext_len: usize = 0;
+        var len: c_int = undefined;
+        rv = openssl.EVP_EncryptUpdate(ctx, ciphertext, &len, @ptrCast([*c]const u8, plaintext), @intCast(c_int, plaintext.len));
+        std.debug.assert(rv == 1);
+        ciphertext_len += @intCast(usize, len);
+
+        rv = openssl.EVP_EncryptFinal_ex(ctx, @ptrCast([*c]u8, &ciphertext[(ciphertext_len - 1)..]), &len);
+        std.debug.assert(rv == 1);
+        ciphertext_len += @intCast(usize, len);
+
+        // TODO: Do I need it?
+        // /* Get the authentication tag. */
+        // EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, *tag_len, *tag);
+
+        return ciphertext[0..ciphertext_len];
+    }
+
+    pub fn decrypt(self: *Handshake, allocator: mem.Allocator, ciphertext: []const u8) ![]const u8 {
+        var plaintext = try allocator.allocSentinel(u8, ciphertext.len, 0);
+
+        var rv: c_int = undefined;
+
+        var ctx = openssl.EVP_CIPHER_CTX_new();
+        defer openssl.EVP_CIPHER_CTX_free(ctx);
+
+        rv = openssl.EVP_DecryptInit_ex(ctx, openssl.EVP_aes_128_ctr(), null, null, null);
+        std.debug.assert(rv == 1);
+        rv = openssl.EVP_CIPHER_CTX_ctrl(ctx, openssl.EVP_CTRL_GCM_SET_IVLEN, self.iv.len, null);
+        rv = openssl.EVP_DecryptInit_ex(ctx, null, null, self.symkey, &self.iv);
+        std.debug.assert(rv == 1);
+
+        var plaintext_len: usize = 0;
+        var len: c_int = undefined;
+        rv = openssl.EVP_DecryptUpdate(ctx, plaintext, &len, @ptrCast([*c]const u8, ciphertext), @intCast(c_int, ciphertext.len));
+        std.debug.assert(rv == 1);
+        plaintext_len += @intCast(usize, len);
+
+        rv = openssl.EVP_DecryptFinal_ex(ctx, @ptrCast([*c]u8, &plaintext[(plaintext_len - 1)..]), &len);
+        std.debug.assert(rv == 1);
+        plaintext_len += @intCast(usize, len);
+
+        // TODO: Do I need it?
+        // /* Get the authentication tag. */
+        // EVP_CIPHER_CTX_ctrl(ctx, EVP_CTRL_GCM_GET_TAG, *tag_len, *tag);
+
+        return plaintext[0..plaintext_len];
     }
 
     pub fn deinit(self: *Handshake) void {
