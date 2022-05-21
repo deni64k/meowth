@@ -34,6 +34,7 @@ pub fn build(b: *Builder) void {
     const lib_tests = b.addTest("lib/meowth.zig");
     lib_tests.linkSystemLibrary("crypto");
     lib_tests.linkSystemLibrary("c");
+    lib_tests.defineCMacro("OPENSSL_NO_FILENAMES", null);
     lib_tests.setBuildMode(mode);
 
     const test_step = b.step("test", "Run library tests");
