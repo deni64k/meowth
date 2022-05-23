@@ -52,45 +52,56 @@ pub const Secp256k1 = struct {
 
     pub fn fromPublicKey(pubkey: []const u8) !Secp256k1 {
         var key: *openssl.EC_KEY = openssl.EC_KEY_new_by_curve_name(openssl.NID_secp256k1) orelse return error.CouldNotGetKey;
-        // var group = openssl.EC_KEY_get0_group(key);
-        // var point = openssl.EC_POINT_new(group);
-        // defer openssl.EC_POINT_free(point);
 
-        // var rv = openssl.EC_POINT_oct2point(group, point, pubkey, pubkey.len, 0);
+        var group = openssl.EC_KEY_get0_group(key) orelse return error.CouldNotGetGroup;
+        var pt = openssl.EC_POINT_new(group) orelse return error.CouldNotAllocatePoint;
+        // defer openssl.EC_POINT_free(pt);
 
         var rv: c_int = undefined;
         if (pubkey.len == 64) {
             var full_pubkey: [65:0]u8 = undefined;
             full_pubkey[0] = 0x04;
             std.mem.copy(u8, full_pubkey[1..], pubkey);
-            rv = openssl.EC_KEY_oct2key(key, @ptrCast([*c]const u8, &full_pubkey), full_pubkey.len, null);
+            rv = openssl.EC_POINT_oct2point(group, pt, @as([*c]const u8, full_pubkey[0..]), full_pubkey.len, null);
         } else {
-            rv = openssl.EC_KEY_oct2key(key, @ptrCast([*c]const u8, &pubkey), pubkey.len, null);
+            rv = openssl.EC_POINT_oct2point(group, pt, @as([*c]const u8, pubkey.ptr), pubkey.len, null);
         }
         // TODO: Return an error.
         std.debug.assert(rv == 1);
 
-        // EC_KEY_set_public_key(key, point);
+        _ = openssl.EC_KEY_set_public_key(key, pt);
 
         return Secp256k1{
             .key = key,
         };
     }
 
-    pub fn fromPrivateKey(pubkey: []u8) !Secp256k1 {
+    pub fn fromPrivateKey(privkey: []const u8) !Secp256k1 {
         var key: *openssl.EC_KEY = openssl.EC_KEY_new_by_curve_name(openssl.NID_secp256k1) orelse return error.CouldNotGetKey;
-        // var group = openssl.EC_KEY_get0_group(key);
-        // var point = openssl.EC_POINT_new(group);
-        // defer openssl.EC_POINT_free(point);
 
-        var rv = openssl.EC_KEY_oct2priv(key, pubkey, pubkey.len, 0);
-        // TODO: Return an error.
-        std.assert.debug(rv == 1);
+        if (openssl.EC_KEY_oct2priv(key, @as([*c]const u8, privkey.ptr), privkey.len) != 1) {
+            return error.CouldNotSetPrivateKey;
+        }
 
-        // EC_KEY_set_private_key(key, point);
+        var ctx = openssl.BN_CTX_new();
+        defer openssl.BN_CTX_free(ctx);
 
-        // TODO: Generate the public key?
-        // https://cpp.hotexamples.com/site/file?hash=0xba6cf0166b4dedd3bf5be11f369304ad16db731f7fc0c0c7a5cb84fd58fc4de2&fullName=luajit-android-master/lua-openssl/src/pkey.c&project=houzhenggang/luajit-android
+        var group = openssl.EC_KEY_get0_group(key) orelse return error.CouldNotGetGroup;
+        var pubkey_pt = openssl.EC_POINT_new(group) orelse return error.CouldNotAllocatePoint;
+        defer openssl.EC_POINT_free(pubkey_pt);
+
+        var privkey_bn = openssl.EC_KEY_get0_private_key(key) orelse return error.CouldNotGetPrivateKey;
+        if (openssl.EC_POINT_mul(group, pubkey_pt, privkey_bn, null, null, ctx) != 1) {
+            return error.CouldNotCalculatePublicKey;
+        }
+
+        if (openssl.EC_KEY_set_public_key(key, pubkey_pt) != 1) {
+            return error.CouldNotSetPublicKey;
+        }
+
+        if (openssl.EC_KEY_check_key(key) != 1) {
+            return error.KeyVerificationFailed;
+        }
 
         return Secp256k1{
             .key = key,
@@ -105,19 +116,22 @@ pub const Secp256k1 = struct {
         openssl.EC_KEY_set_conv_form(self.key, if (compressed) openssl.POINT_CONVERSION_COMPRESSED else openssl.POINT_CONVERSION_UNCOMPRESSED);
     }
 
-    pub fn privateKeyToBytes(self: *Secp256k1, allocator: mem.Allocator) ![:0]u8 {
-        const size = @intCast(usize, openssl.i2d_ECPrivateKey(self.key, 0));
-        var bytes: [:0]u8 = try allocator.allocSentinel(u8, size, 0);
-        const written_bytes = openssl.i2d_ECPrivateKey(self.key, @ptrCast([*c][*c]u8, &@ptrCast([*c]u8, bytes)));
-        std.debug.assert(size == written_bytes);
+    pub fn privateKeyToBytes(self: *const Secp256k1, allocator: mem.Allocator) ![]u8 {
+        const size = @intCast(usize, openssl.EC_KEY_priv2oct(self.key, null, 0));
+        var bytes = try allocator.allocSentinel(u8, size, 0);
+        const rv = openssl.EC_KEY_priv2oct(self.key, @as([*c]u8, bytes), size);
+        std.debug.assert(rv > 0);
         return bytes;
     }
 
-    pub fn publicKeyToBytes(self: *Secp256k1, allocator: mem.Allocator) ![:0]u8 {
-        const size = @intCast(usize, openssl.i2o_ECPublicKey(self.key, 0));
-        var bytes: [:0]u8 = try allocator.allocSentinel(u8, size, 0);
-        const written_bytes = openssl.i2o_ECPublicKey(self.key, @ptrCast([*c][*c]u8, &@ptrCast([*c]u8, bytes)));
-        std.debug.assert(size == written_bytes);
+    pub fn publicKeyToBytes(self: *const Secp256k1, allocator: mem.Allocator) ![]u8 {
+        var group = openssl.EC_KEY_get0_group(self.key) orelse return error.CouldNotGetGroup;
+        var pt = openssl.EC_KEY_get0_public_key(self.key) orelse return error.CouldNotGetPoint;
+
+        const size = @intCast(usize, openssl.EC_POINT_point2oct(group, pt, openssl.POINT_CONVERSION_UNCOMPRESSED, null, 0, null));
+        var bytes = try allocator.allocSentinel(u8, size, 0);
+        const rv = openssl.EC_POINT_point2oct(group, pt, openssl.POINT_CONVERSION_UNCOMPRESSED, @as([*c]u8, bytes.ptr), size, null);
+        std.debug.assert(rv > 0);
         return bytes;
     }
 
@@ -134,9 +148,9 @@ pub const Secp256k1 = struct {
     }
 
     pub fn sign(self: *Secp256k1, allocator: mem.Allocator, message: [:0]const u8) ![:0]u8 {
-        var size = openssl.ECDSA_size(self.key);
+        var size = @intCast(c_uint, openssl.ECDSA_size(self.key));
         var sig: [:0]u8 = try allocator.allocSentinel(u8, @intCast(usize, size), 0);
-        const rv = openssl.ECDSA_sign(0, message, @intCast(c_int, message.len), @ptrCast([*c]u8, sig), @ptrCast([*c]c_uint, &size), self.key);
+        const rv = openssl.ECDSA_sign(0, message, @intCast(c_int, message.len), @as([*c]u8, sig.ptr), &size, self.key);
         defer allocator.free(sig);
         std.debug.assert(rv == 1);
         var result: [:0]u8 = try allocator.allocSentinel(u8, @intCast(usize, size), 0);
@@ -153,14 +167,12 @@ pub const Secp256k1 = struct {
 };
 
 pub const Ecies = struct {
-    const auth_vsn = 4;
-
-    pub fn generateShared(local: Secp256k1, remote: Secp256k1) ![*:0]u8 {
+    pub fn generateShared(allocator: mem.Allocator, local: Secp256k1, remote: Secp256k1) ![]u8 {
         const remote_pubkey_pt = try remote.getPublicKey();
 
         var symkey_size = @divTrunc(openssl.EC_GROUP_get_degree(try remote.getGroup()) + @as(c_int, 7), @as(c_int, 8));
-        var symkey = openssl.OPENSSL_malloc(@intCast(usize, symkey_size + 1));
-        symkey_size = openssl.ECDH_compute_key(symkey, @intCast(usize, symkey_size), remote_pubkey_pt, local.getKey(), null);
+        var symkey = try allocator.allocSentinel(u8, @intCast(usize, symkey_size), 0);
+        symkey_size = openssl.ECDH_compute_key(@as([*c]u8, symkey), @intCast(usize, symkey_size), remote_pubkey_pt, local.getKey(), null);
 
         // var local_buf: [33:0]u8 = undefined;
         // _ = openssl.EC_KEY_key2buf(local.getKey(), openssl.POINT_CONVERSION_COMPRESSED, @ptrCast([*c][*c]u8, &@ptrCast([*c]u8, &local_buf)), null);
@@ -168,11 +180,7 @@ pub const Ecies = struct {
         // NOTE: The private key is thrown away here...
         // With ECIES the transmitter EC key pair is a one time use only.
 
-        return @ptrCast([*:0]u8, symkey.?);
-    }
-
-    pub fn freeShared(shared: [*:0]u8) void {
-        openssl.OPENSSL_free(shared);
+        return symkey;
     }
 
     // NIST SP 800-56 Concatenation Key Derivation Function (see section 5.8.1).
@@ -183,21 +191,17 @@ pub const Ecies = struct {
         const key_len = 16;
         const kd_len = key_len * 2;
         const hash_size = 32;
-        const reps = @divTrunc(kd_len + 7, hash_size);
 
         var counter: u32 = 1;
         var out: [kd_len]u8 = undefined;
-        var i: usize = 0;
-        while (counter <= reps) : (counter += 1) {
+        var written_bytes: usize = 0;
+        while (written_bytes < kd_len) : (written_bytes += hash_size) {
             var h = std.crypto.hash.sha2.Sha256.init(.{});
             h.update(std.mem.asBytes(&std.mem.nativeToBig(u32, counter)));
             h.update(z);
             h.update(s1);
-            var o: [32]u8 = undefined;
-            // TODO: Write to out directly instead of using o.
-            h.final(o[0..]);
-            std.mem.copy(u8, out[((reps - i - 1) * hash_size)..((reps - i) * hash_size)], o[0..]);
-            i += 1;
+            h.final(@ptrCast(*[32]u8, out[written_bytes..(written_bytes + hash_size)].ptr));
+            counter += 1;
         }
 
         // var out: [32]u8 = undefined;
@@ -211,21 +215,23 @@ pub const Ecies = struct {
     //
     // Always uses SHA256.
     //
-    pub fn deriveKeys(z: []const u8, s1: []const u8, out_ke: *[16]u8, out_km: *[16]u8) void {
+    pub fn deriveKeys(z: []const u8, s1: []const u8, out_ke: *[16]u8, out_km: *[32]u8) void {
         const kdf = Ecies.concatKDF(z, s1);
-        std.mem.copy(u8, out_ke, kdf[0..out_ke.len]);
-        std.mem.copy(u8, out_km, kdf[out_ke.len..]);
+        std.mem.copy(u8, out_ke, kdf[0..16]);
+
+        var h = std.crypto.hash.sha2.Sha256.init(.{});
+        h.update(kdf[16..]);
+        h.final(out_km);
     }
 
-    pub fn messageTag(in_km: [16]u8, message: []const u8, shared: []const u8) [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 {
-        var h = std.crypto.hash.sha2.Sha256.init(.{});
-        h.update(in_km[0..]);
-        var km: [32]u8 = undefined;
-        h.final(km[0..]);
-
+    pub fn messageTag(km: [32]u8, iv: []const u8, message: []const u8, shared: []const u8) [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 {
         var out: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
-        var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(&km);
+        var hmac = std.crypto.auth.hmac.sha2.HmacSha256.init(km[0..]);
+        // std.debug.print("messageTag: iv = {x}\n", .{std.fmt.fmtSliceHexLower(iv)});
+        hmac.update(iv[0..]);
+        // std.debug.print("messageTag: message = {x}\n", .{std.fmt.fmtSliceHexLower(message)});
         hmac.update(message[0..]);
+        // std.debug.print("messageTag: shared = {x}\n", .{std.fmt.fmtSliceHexLower(shared)});
         hmac.update(shared[0..]);
         hmac.final(out[0..]);
 
@@ -237,8 +243,12 @@ pub const Ecies = struct {
     //     sha2.HmacSha256.create(out[0..], "The quick brown fox jumps over the lazy dog", "key");
     // }
 
-    pub fn encryptAes(allocator: mem.Allocator, iv: [16:0]u8, symkey: []u8, plaintext: []const u8) ![]u8 {
-        var ciphertext = try allocator.allocSentinel(u8, (plaintext.len + 0x0f) & ~@as(u8, 0x0f), 0);
+    pub fn encryptAes(allocator: mem.Allocator, iv: []u8, symkey: []u8, plaintext: []const u8) ![]u8 {
+        var to_alloc: usize = plaintext.len & ~@as(usize, 0x0f);
+        if (plaintext.len % 16 != 0) {
+            to_alloc += 16;
+        }
+        var ciphertext = try allocator.allocSentinel(u8, to_alloc, 0);
 
         var ctx = openssl.EVP_CIPHER_CTX_new();
         defer openssl.EVP_CIPHER_CTX_free(ctx);
@@ -246,16 +256,16 @@ pub const Ecies = struct {
         var rv: c_int = undefined;
         rv = openssl.EVP_EncryptInit_ex(ctx, openssl.EVP_aes_128_ctr(), null, null, null);
         std.debug.assert(rv == 1);
-        rv = openssl.EVP_EncryptInit_ex(ctx, null, null, @ptrCast([*c]const u8, &symkey), &iv);
+        rv = openssl.EVP_EncryptInit_ex(ctx, null, null, @as([*c]const u8, symkey.ptr), @as([*c]u8, iv.ptr));
         std.debug.assert(rv == 1);
 
         var ciphertext_len: usize = 0;
         var len: c_int = undefined;
-        rv = openssl.EVP_EncryptUpdate(ctx, ciphertext, &len, @ptrCast([*c]const u8, plaintext), @intCast(c_int, plaintext.len));
+        rv = openssl.EVP_EncryptUpdate(ctx, ciphertext, &len, @as([*c]const u8, plaintext.ptr), @intCast(c_int, plaintext.len));
         std.debug.assert(rv == 1);
         ciphertext_len += @intCast(usize, len);
 
-        rv = openssl.EVP_EncryptFinal_ex(ctx, @ptrCast([*c]u8, &ciphertext[(ciphertext_len - 1)..]), &len);
+        rv = openssl.EVP_EncryptFinal_ex(ctx, @as([*c]u8, ciphertext[(ciphertext_len - 1)..].ptr), &len);
         std.debug.assert(rv == 1);
         ciphertext_len += @intCast(usize, len);
 
@@ -266,7 +276,7 @@ pub const Ecies = struct {
         return ciphertext[0..ciphertext_len];
     }
 
-    pub fn decryptAes(allocator: mem.Allocator, iv: [16:0]u8, symkey: []u8, ciphertext: []const u8) ![]const u8 {
+    pub fn decryptAes(allocator: mem.Allocator, iv: []u8, symkey: []u8, ciphertext: []const u8) ![]const u8 {
         var plaintext = try allocator.allocSentinel(u8, ciphertext.len, 0);
 
         var rv: c_int = undefined;
@@ -276,85 +286,120 @@ pub const Ecies = struct {
 
         rv = openssl.EVP_DecryptInit_ex(ctx, openssl.EVP_aes_128_ctr(), null, null, null);
         std.debug.assert(rv == 1);
-        rv = openssl.EVP_CIPHER_CTX_ctrl(ctx, openssl.EVP_CTRL_GCM_SET_IVLEN, iv.len, null);
-        rv = openssl.EVP_DecryptInit_ex(ctx, null, null, @ptrCast([*c]const u8, &symkey), &iv);
+        rv = openssl.EVP_CIPHER_CTX_ctrl(ctx, openssl.EVP_CTRL_GCM_SET_IVLEN, @intCast(c_int, iv.len), null);
+        rv = openssl.EVP_DecryptInit_ex(ctx, null, null, @as([*c]const u8, symkey.ptr), @as([*c]u8, iv.ptr));
         std.debug.assert(rv == 1);
 
         var plaintext_len: usize = 0;
         var len: c_int = undefined;
-        rv = openssl.EVP_DecryptUpdate(ctx, plaintext, &len, @ptrCast([*c]const u8, ciphertext), @intCast(c_int, ciphertext.len));
+        rv = openssl.EVP_DecryptUpdate(ctx, plaintext, &len, @as([*c]const u8, ciphertext.ptr), @intCast(c_int, ciphertext.len));
         std.debug.assert(rv == 1);
         plaintext_len += @intCast(usize, len);
 
-        rv = openssl.EVP_DecryptFinal_ex(ctx, @ptrCast([*c]u8, &plaintext[(plaintext_len - 1)..]), &len);
+        rv = openssl.EVP_DecryptFinal_ex(ctx, @as([*c]u8, plaintext[(plaintext_len - 1)..].ptr), &len);
         std.debug.assert(rv == 1);
         plaintext_len += @intCast(usize, len);
 
         return plaintext[0..plaintext_len];
     }
 
-    pub fn encrypt(allocator: mem.Allocator, remote: Secp256k1, plaintext: []const u8) ![]u8 {
+    pub fn encrypt(
+        allocator: mem.Allocator,
+        ekey: Secp256k1,
+        remote: Secp256k1,
+        plaintext: []const u8,
+        s1: []const u8,
+        shared_mac_data: ?[]const u8,
+    ) ![]u8 {
         var rv: c_int = undefined;
         var result = std.ArrayList(u8).init(allocator);
         var writer = result.writer();
 
-        var ekey = try Secp256k1.generate();
-
-        var ekeyBytes: [:0]u8 = try ekey.publicKeyToBytes(allocator);
+        var ekeyBytes = try ekey.publicKeyToBytes(allocator);
         defer allocator.free(ekeyBytes);
 
-        const shared = try Ecies.generateShared(ekey, remote);
-        defer Ecies.freeShared(shared);
+        const shared = try Ecies.generateShared(allocator, ekey, remote);
+        defer allocator.free(shared);
 
-        var iv: [16:0]u8 = undefined;
-        rv = openssl.RAND_pseudo_bytes(&iv, iv.len);
+        var iv: [16]u8 = undefined;
+        rv = openssl.RAND_pseudo_bytes(@as([*c]u8, &iv), iv.len);
         std.debug.assert(rv == 1);
+        // std.debug.print("Ecies.encrypt: iv = {x}\n", .{std.fmt.fmtSliceHexLower(iv[0..])});
 
-        var km: [16]u8 = undefined;
         var ke: [16]u8 = undefined;
+        var km: [32]u8 = undefined;
 
-        Ecies.deriveKeys(std.mem.span(shared), "", &ke, &km);
+        Ecies.deriveKeys(std.mem.span(shared), s1, &ke, &km);
+        // std.debug.print("Ecies.encrypt: ke = {x}\n", .{std.fmt.fmtSliceHexLower(ke[0..])});
+        // std.debug.print("Ecies.encrypt: km = {x}\n", .{std.fmt.fmtSliceHexLower(km[0..])});
 
-        const encrypted = try Ecies.encryptAes(allocator, iv, km[0..], plaintext);
+        const encrypted = try Ecies.encryptAes(allocator, iv[0..], ke[0..], plaintext);
         defer allocator.free(encrypted);
 
-        const d = Ecies.messageTag(km, encrypted, "");
+        var encrypted_len_be = std.mem.nativeToBig(u16, @intCast(u16, encrypted.len + ekeyBytes.len + iv.len + 32));
+        // std.debug.print("Ecies.encrypt: shared_mac_data = {x}\n", .{std.fmt.fmtSliceHexLower(shared_mac_data orelse "")});
+        // std.debug.print("Ecies.encrypt: shared_mac_data = {x}\n", .{std.fmt.fmtSliceHexLower(shared_mac_data orelse std.mem.asBytes(&encrypted_len_be))});
+        const d = Ecies.messageTag(km, std.mem.span(iv[0..]), encrypted, shared_mac_data orelse std.mem.asBytes(&encrypted_len_be));
 
-        // std.debug.print("ekeyBytes={d}\n", .{ekeyBytes});
-        // std.debug.print("iv={d}\n", .{iv});
-        // std.debug.print("encrypted={d}\n", .{encrypted});
-        // std.debug.print("d={d}\n", .{d});
+        var written_bytes: usize = 0;
+        written_bytes += try writer.write(std.mem.span(ekeyBytes[0..]));
+        // std.debug.print("ecies.encrypt: Has written {d} bytes\n", .{written_bytes});
+        written_bytes += try writer.write(iv[0..]);
+        // std.debug.print("ecies.encrypt: Has written {d} bytes\n", .{written_bytes});
+        written_bytes += try writer.write(encrypted);
+        // std.debug.print("ecies.encrypt: Has written {d} bytes\n", .{written_bytes});
+        written_bytes += try writer.write(d[0..]);
+        // std.debug.print("ecies.encrypt: Has written {d} bytes\n", .{written_bytes});
 
-        _ = try writer.write(std.mem.span(ekeyBytes[0..]));
-        _ = try writer.write(iv[0..]);
-        _ = try writer.write(encrypted);
-        _ = try writer.write(d[0..]);
+        // std.debug.print("ecies.encrypt: result.items.len={d}\n", .{result.items.len});
 
         return result.items;
     }
 
-    pub fn decrypt(allocator: mem.Allocator, local: Secp256k1, ciphertext: []const u8) ![]const u8 {
-        // TODO: Just ciphertext[0..65] doesn't work.
-        var ekey = try Secp256k1.fromPublicKey(ciphertext[1..65]);
+    pub fn decrypt(
+        allocator: mem.Allocator,
+        local: Secp256k1,
+        ciphertext: []const u8,
+        s1: []const u8,
+        shared_mac_data: ?[]const u8,
+    ) ![]const u8 {
+        var ekey = try Secp256k1.fromPublicKey(ciphertext[0..65]);
+        defer ekey.deinit();
+        // std.debug.print("Ecies.decrypt: ciphertext[0..65] = {x}\n", .{std.fmt.fmtSliceHexLower(ciphertext[0..65])});
+        var epubkey = try ekey.publicKeyToBytes(allocator);
+        defer allocator.free(epubkey);
+        // std.debug.print("Ecies.decrypt: epubkey = {x}\n", .{std.fmt.fmtSliceHexLower(epubkey[0..])});
 
-        const shared = try Ecies.generateShared(local, ekey);
-        defer Ecies.freeShared(shared);
+        const shared = try Ecies.generateShared(allocator, local, ekey);
+        defer allocator.free(shared);
+        // std.debug.print("Ecies.decrypt: shared = {x}\n", .{std.fmt.fmtSliceHexLower(shared[0..])});
 
-        var iv: [16:0]u8 = undefined;
+        var iv: [16]u8 = undefined;
         std.mem.copy(u8, &iv, ciphertext[65..(65 + 16)]);
+        // std.debug.print("Ecies.decrypt: iv = {x}\n", .{std.fmt.fmtSliceHexLower(iv[0..])});
 
-        var km: [16]u8 = undefined;
         var ke: [16]u8 = undefined;
+        var km: [32]u8 = undefined;
 
-        Ecies.deriveKeys(std.mem.span(shared), "", &ke, &km);
+        Ecies.deriveKeys(shared, s1, &ke, &km);
+        // std.debug.print("Ecies.decrypt: s1 = {x}\n", .{std.fmt.fmtSliceHexLower(s1)});
+        // std.debug.print("Ecies.decrypt: ke = {x}\n", .{std.fmt.fmtSliceHexLower(ke[0..])});
+        // std.debug.print("Ecies.decrypt: km = {x}\n", .{std.fmt.fmtSliceHexLower(km[0..])});
 
-        const d = ciphertext[(ciphertext.len - 32)..];
         const encrypted = ciphertext[(65 + 16)..(ciphertext.len - 32)];
-        const expected_d = Ecies.messageTag(km, encrypted, "");
+        var encrypted_len_be = std.mem.nativeToBig(u16, @intCast(u16, encrypted.len));
+        // _ = shared_mac_data;
+        const d = ciphertext[(ciphertext.len - 32)..];
+        const expected_d = Ecies.messageTag(km, iv[0..], encrypted, shared_mac_data orelse std.mem.asBytes(&encrypted_len_be));
+        // std.debug.print("Ecies.decrypt: encrypted = {x}\n", .{std.fmt.fmtSliceHexLower(encrypted)});
+        // std.debug.print("Ecies.decrypt: ciphertext.len = {d}\n", .{ciphertext.len});
+        // std.debug.print("Ecies.decrypt: shared_mac_data = {x}\n", .{std.fmt.fmtSliceHexLower(shared_mac_data orelse std.mem.asBytes(&encrypted_len_be))});
+        std.debug.print("Ecies.decrypt: d = {x}\n", .{std.fmt.fmtSliceHexLower(d)});
+        std.debug.print("Ecies.decrypt: expected_d = {x}\n", .{std.fmt.fmtSliceHexLower(expected_d[0..])});
         if (!std.mem.eql(u8, d, expected_d[0..]))
             return error.MessageTagMismatch;
 
-        return try Ecies.decryptAes(allocator, iv, km[0..], encrypted);
+        return try Ecies.decryptAes(allocator, iv[0..], ke[0..], encrypted);
     }
 };
 
@@ -371,13 +416,16 @@ test "concatKDF" {
 test "ecies" {
     const plaintext = "I am Alice!";
 
+    var ekey = try Secp256k1.generate();
+    defer ekey.deinit();
     var remote = try Secp256k1.generate();
     defer remote.deinit();
 
-    var encrypted = try Ecies.encrypt(testing.allocator, remote, plaintext);
+    var encrypted = try Ecies.encrypt(testing.allocator, ekey, remote, plaintext, "s1", "shared_mac_data");
     defer testing.allocator.free(encrypted);
 
-    var decrypted = try Ecies.decrypt(testing.allocator, remote, encrypted);
+    // std.debug.print("encrypted = {x}\n", .{std.fmt.fmtSliceHexLower(encrypted)});
+    var decrypted = try Ecies.decrypt(testing.allocator, remote, encrypted, "s1", "shared_mac_data");
     defer testing.allocator.free(decrypted);
 
     try testing.expectEqualStrings(decrypted, plaintext);

@@ -1,6 +1,34 @@
 const mem = std.mem;
 const std = @import("std");
 
+pub fn encodeAsList(allocator: mem.Allocator, o: anytype) ![]const u8 {
+    var rlp = RLPEncoder.init(allocator);
+    defer rlp.deinit();
+
+    _ = try rlp.encode(o);
+
+    var buf: [9]u8 = undefined;
+    const prefix = RLPEncoder.encodeLen(0xc0, rlp.buf.items.len, &buf);
+    try rlp.buf.insertSlice(0, prefix);
+
+    return rlp.buf.toOwnedSlice();
+}
+
+pub fn decodeAsList(allocator: mem.Allocator, buf: []const u8, dest: anytype) !void {
+    _ = dest;
+    const P = @TypeOf(dest);
+    std.debug.assert(std.meta.trait.isSingleItemPtr(P));
+    //     @compileError("expected single item pointer, passed " ++ @typeName(P));
+
+    var rlp = RLPDecoder.init(allocator);
+
+    var len: usize = undefined;
+    var read_bytes = RLPDecoder.decodeLen(0xc0, buf, &len);
+    _ = read_bytes;
+
+    _ = try rlp.decode(buf[read_bytes..], dest);
+}
+
 pub fn encode(allocator: mem.Allocator, o: anytype) ![]const u8 {
     var rlp = RLPEncoder.init(allocator);
     defer rlp.deinit();
@@ -251,13 +279,17 @@ const RLPDecoder = struct {
                     }
                 }
             },
+            .Array => {
+                read_bytes += try self.readArray(buf, dest);
+                // std.debug.print("rlp.Array: dest={x}\n", .{std.fmt.fmtSliceHexLower(dest)});
+            },
             else => unreachable,
         }
 
         return read_bytes;
     }
 
-    pub fn readInt(_: *RLPDecoder, buf: []const u8, out: *u64) !usize {
+    pub fn readInt(_: *RLPDecoder, buf: []const u8, out: anytype) !usize {
         if (buf[0] < 0x7f) {
             out.* = buf[0];
             return 1;
@@ -270,9 +302,22 @@ const RLPDecoder = struct {
         var bytes = [8]u8{ 0, 0, 0, 0, 0, 0, 0, 0 };
         std.mem.copy(u8, bytes[(8 - len)..], buf[1..len]);
         const value = std.mem.bytesAsValue(u64, &bytes);
-        out.* = std.mem.bigToNative(u64, value.*);
+        out.* = @intCast(@TypeOf(out.*), std.mem.bigToNative(u64, value.*));
 
         return 1 + len;
+    }
+
+    fn readArray(self: *RLPDecoder, bytes: []const u8, out: anytype) !usize {
+        _ = self;
+        var len: usize = undefined;
+        var read_bytes = RLPDecoder.decodeLen(0x80, bytes, &len);
+        len = out.*.len;
+
+        // std.debug.print("rlp.readArray: len={d} read_bytes={d}\n", .{ len, read_bytes });
+
+        std.mem.copy(u8, out.*[0..], bytes[read_bytes..(read_bytes + len)]);
+
+        return read_bytes + len;
     }
 
     fn readString(self: *RLPDecoder, bytes: []const u8, out: *std.ArrayList(u8)) !usize {
